@@ -30,6 +30,13 @@ pub struct DnsContext {
 }
 
 impl DnsContext {
+    pub fn cache_key(&self) -> String {
+        let qtype = self.request.queries()
+            .first()
+            .map(|q| q.query_type().to_string())
+            .unwrap_or_default();
+        format!("{}:{}", self.domain, qtype)
+    }
     pub fn new(client_addr: SocketAddr, request: Message, domain: String) -> Self {
         Self {
             client_addr,

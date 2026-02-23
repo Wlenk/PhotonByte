@@ -1,6 +1,6 @@
 use crate::core::pipeline::{Middleware, NextMiddleware};
 use crate::protocols::dns::DnsContext;
-use crate::middlewares::cache::Cache; // 引入你的缓存结构体
+use crate::middlewares::cache::Cache;
 use async_trait::async_trait;
 use futures::future::join_all;
 use tokio::net::{UdpSocket};
@@ -75,12 +75,17 @@ impl Middleware for UpstreamRunner {
                 }
                 ctx.response = Some(msg.to_vec().unwrap_or(winner_data));
 
+                let cache_key = ctx.cache_key();
                 let domain = ctx.domain.clone();
                 let cache_clone = Arc::clone(&self.cache);
-                
-                tokio::spawn(async move {
-                    tcping_and_cache(domain, msg, cache_clone).await;
-                });
+
+                if cache_clone.try_mark_pending(&cache_key) {
+                    tokio::spawn(async move {
+                        tcping_and_cache(cache_key, msg, cache_clone).await;
+                    });
+                } else {
+                    info!("Already probing {}, skip duplicate tcping", domain);
+                }
             } else {
                 ctx.response = Some(winner_data);
             }
@@ -93,8 +98,9 @@ impl Middleware for UpstreamRunner {
 }
 
 async fn tcping_and_cache(domain: String, msg: Message, cache: Arc<Cache>) {
-
-    let mut ips: Vec<(IpAddr, Record)> = Vec::new();
+    
+    let mut ip_records: Vec<(IpAddr, Record)> = Vec::new();
+    let mut other_records: Vec<Record> = Vec::new();
 
     for ans in msg.answers() {
         if let Some(data) = ans.data() {
@@ -104,71 +110,96 @@ async fn tcping_and_cache(domain: String, msg: Message, cache: Arc<Cache>) {
                 _ => None,
             };
             if let Some(ip) = ip {
-                ips.push((ip, ans.clone()));
+                ip_records.push((ip, ans.clone()));
+            } else {
+                other_records.push(ans.clone());
             }
         }
     }
 
-    if ips.is_empty() {
-        return;
-    }
+    if ip_records.is_empty() { return; }
 
+    let upstream_ip_count = ip_records.len();
     let attempts = 4usize;
     let retries = 2usize;
     let timeout_dur = Duration::from_millis(500);
 
-    let mut tasks = Vec::new();
-
-    for (ip, record) in ips {
-        tasks.push(async move {
-            let m443 = measure_ip_port(ip, 443, attempts, retries, timeout_dur).await;
-            let m80  = measure_ip_port(ip, 80,  attempts, retries, timeout_dur).await;
-            (ip, record, m443, m80)
-        });
-    }
+    let tasks: Vec<_> = ip_records.into_iter().map(|(ip, record)| async move {
+        let m443 = measure_ip_port(ip, 443, attempts, retries, timeout_dur).await;
+        let m80  = measure_ip_port(ip, 80,  attempts, retries, timeout_dur).await;
+        (ip, record, m443, m80)
+    }).collect();
 
     let results = join_all(tasks).await;
 
-    let mut c443 = Vec::new();
-    let mut c80  = Vec::new();
+    let mut candidates: Vec<(Record, f64)> = Vec::new();
+    let mut unreachable_records: Vec<Record> = Vec::new();
 
     for (_ip, record, m443, m80) in results {
         if m443.successes > 0 {
-            c443.push((record.clone(), m443));
-        }
-        if m80.successes > 0 {
-            c80.push((record.clone(), m80));
+            candidates.push((record, m443.mean_ms()));
+        } else if m80.successes > 0 {
+            candidates.push((record, m80.mean_ms()));
+        } else {
+            unreachable_records.push(record);
         }
     }
 
-    let chosen = if let Some(best) = pick_best(c443) {
-        Some(best)
-    } else {
-        pick_best(c80)
-    };
+    let mut final_records: Vec<Record> = Vec::new();
 
-    if let Some((mut record, metrics)) = chosen {
+    if !candidates.is_empty() {
+        candidates.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
 
-        let mut cache_msg = Message::new();
-        cache_msg.set_id(msg.id());
-        cache_msg.set_message_type(MessageType::Response);
-
-        for q in msg.queries().to_vec() {
-            cache_msg.add_query(q);
+        for (record, latency) in &candidates {
+            info!("  candidate: {:?} latency={:.2}ms", record.data(), latency);
         }
 
-        record.set_ttl(3600);
-        cache_msg.add_answer(record);
-
-        if let Ok(bytes) = cache_msg.to_vec() {
-            cache.set(domain.clone(), bytes, 3600);
-            info!(
-                "BEST {} mean={:.2}ms var={:.2} loss={:.3}",
-                domain,
-                metrics.mean_ms(),
-                metrics.variance_ms(),
-                metrics.packet_loss()
-            );
+        let mut last_latency = candidates[0].1;
+        for (mut record, latency) in candidates {
+            if final_records.len() >= upstream_ip_count { break; }
+            if latency - last_latency > 40.0 && !final_records.is_empty() { break; }
+            let ttl_capped = std::cmp::min(record.ttl(), 600);
+            record.set_ttl(ttl_capped);
+            final_records.push(record);
+            last_latency = latency;
         }
+    }
+
+    if final_records.is_empty() {
+        for mut record in unreachable_records {
+            let ttl_capped = std::cmp::min(record.ttl(), 600);
+            record.set_ttl(ttl_capped);
+            final_records.push(record);
+        }
+    }
+
+    for mut record in other_records {
+        let ttl_capped = std::cmp::min(record.ttl(), 600);
+        record.set_ttl(ttl_capped);
+        final_records.push(record);
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    let mut deduped: Vec<Record> = Vec::new();
+    for record in final_records {
+        let key = format!("{:?}", record.data());
+        if seen.insert(key) {
+            deduped.push(record);
+        }
+    }
+
+    let mut cache_msg = Message::new();
+    cache_msg.set_id(msg.id());
+    cache_msg.set_message_type(MessageType::Response);
+    for q in msg.queries().to_vec() {
+        cache_msg.add_query(q);
+    }
+    for record in &deduped {
+        cache_msg.add_answer(record.clone());
+    }
+
+    if let Ok(bytes) = cache_msg.to_vec() {
+        cache.set(domain.clone(), bytes, 600);
+        info!("Cached {} IPs for {}", cache_msg.answers().len(), domain);
     }
 }

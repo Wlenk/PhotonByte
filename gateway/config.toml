@@ -1,5 +1,5 @@
 [server]
-listen_addr = "127.0.0.1:5354"
+listen_addr = "127.0.0.1:53"
 cache_capacity = 10000
 
 [rules]
@@ -8,7 +8,6 @@ enable_cache = true
 block_mode = "0.0.0.0"
 blacklist = [
     "ad.xiaomi.com",
-    "*.baidu.com",
     "track.apple.com",
     "tiktok.com"
 ]
