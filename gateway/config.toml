@@ -1,0 +1,38 @@
+[server]
+listen_addr = "127.0.0.1:5354"
+cache_capacity = 10000
+
+[rules]
+enable_cache = true
+# nxdomain refused 0.0.0.0
+block_mode = "0.0.0.0"
+blacklist = [
+    "ad.xiaomi.com",
+    "*.baidu.com",
+    "track.apple.com",
+    "tiktok.com"
+]
+
+[[upstreams]]
+name = "Aliyun_Primary"
+address = "223.5.5.5:53"
+protocol = "udp"
+timeout_ms = 800
+
+[[upstreams]]
+name = "Tencent_Primary"
+address = "119.29.29.29:53"
+protocol = "udp"
+timeout_ms = 800
+
+[[upstreams]]
+name = "Google_Public"
+address = "8.8.8.8:53"
+protocol = "udp"
+timeout_ms = 1500
+
+[[upstreams]]
+name = "Cloudflare"
+address = "1.1.1.1:53"
+protocol = "udp"
+timeout_ms = 1500

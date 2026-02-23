@@ -1,0 +1,23 @@
+[package]
+name = "photonbyte_gateway"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1.36", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
+hickory-proto = "0.24"
+async-trait = "0.1"
+dashmap = "5.5"
+futures = "0.3"
+# hickory-dns = 
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
