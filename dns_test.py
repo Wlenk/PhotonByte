@@ -3,7 +3,7 @@ import struct
 import random
 import sys
 
-SERVER = ("127.0.0.1", 5354)
+SERVER = ("127.0.0.1", 53)
 
 def build_query(domain, qtype=1):
     tid = random.randint(0, 65535)

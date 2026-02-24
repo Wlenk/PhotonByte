@@ -2,7 +2,7 @@ use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tracing::{info, error};
 
-use crate::core::pipeline::{Middleware, NextMiddleware};
+use crate::core::{api, pipeline::{Middleware, NextMiddleware}};
 
 mod config;
 mod utils;
@@ -28,8 +28,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listen_addr = &app_config.server.listen_addr;
     
 
-    let dns_cache = std::sync::Arc::new(middlewares::cache::Cache::new());
+    let dns_cache = std::sync::Arc::new(middlewares::cache::Cache::new(5000));
 
+    let api_cache_clone = std::sync::Arc::clone(&dns_cache);
+    
+    tokio::spawn(async move {
+        let listener = tokio::net::TcpListener::bind("0.0.0.0:5354").await.unwrap();
+        let app = api::build_router(api_cache_clone);
+        
+        tracing::info!("🚀 API Server running on http://0.0.0.0:5354");
+        axum::serve(listener, app).await.unwrap();
+    });
     info!("loading pipeline");
     let mut pipeline_builder: Vec<Box<dyn core::pipeline::Middleware>> = Vec::new();
 

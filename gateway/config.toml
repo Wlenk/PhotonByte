@@ -13,25 +13,43 @@ blacklist = [
 ]
 
 [[upstreams]]
-name = "Aliyun_Primary"
+name = "Aliyun_UDP"
 address = "223.5.5.5:53"
 protocol = "udp"
-timeout_ms = 800
+timeout_ms = 400
 
 [[upstreams]]
-name = "Tencent_Primary"
+name = "Tencent_UDP"
 address = "119.29.29.29:53"
 protocol = "udp"
-timeout_ms = 800
+timeout_ms = 400
 
 [[upstreams]]
-name = "Google_Public"
-address = "8.8.8.8:53"
+name = "Google_DoH"
+address = "https://dns.google/dns-query"
+protocol = "doh"
+timeout_ms = 1500
+
+[[upstreams]]
+name = "Cloudflare_DoH"
+address = "https://1.1.1.1/dns-query"
+protocol = "doh"
+timeout_ms = 1500
+
+[[upstreams]]
+name = "Unicom"
+address = "192.168.1.1:53"
 protocol = "udp"
 timeout_ms = 1500
 
 [[upstreams]]
-name = "Cloudflare"
-address = "1.1.1.1:53"
+name = "Telecom-1"
+address = "218.85.152.99:53"
+protocol = "udp"
+timeout_ms = 1500
+
+[[upstreams]]
+name = "Telecom-2"
+address = "218.85.157.99:53"
 protocol = "udp"
 timeout_ms = 1500
