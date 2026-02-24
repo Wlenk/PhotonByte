@@ -153,7 +153,7 @@ impl Middleware for UpstreamRunner {
         };
         let (tx, mut rx) =
             tokio::sync::mpsc::channel::<(String, String, Vec<u8>)>(self.upstreams.len());
-
+        let current_mode = self.cache.get_mode();
         for upstream in &self.upstreams {
             let tx_c = tx.clone();
             let data_c = packet_data.clone();
@@ -186,13 +186,14 @@ impl Middleware for UpstreamRunner {
                             info!("Drop {} from {}", ip, name);
                             continue;
                         }
-                        let m443 = measure_ip_port(ip, 443, 1, 0, Duration::from_millis(200)).await;
-                        if m443.successes == 0 {
-                            let m80 =
-                                measure_ip_port(ip, 80, 1, 0, Duration::from_millis(200)).await;
-                            if m80.successes == 0 {
-                                info!("{} unreachable, waiting...", ip);
-                                continue;
+                        if current_mode == SpeedMode::Aggressive {
+                            let m443 = measure_ip_port(ip, 443, 1, 0, Duration::from_millis(200)).await;
+                            if m443.successes == 0 {
+                                let m80 = measure_ip_port(ip, 80, 1, 0, Duration::from_millis(200)).await;
+                                if m80.successes == 0 {
+                                    info!("Aggressive: {} unreachable, waiting for next...", ip);
+                                    continue;
+                                }
                             }
                         }
                     }
@@ -291,7 +292,20 @@ async fn background_aggregate_and_cache(
     }
 
     if ip_pool.is_empty() {
-        return;
+        if other_records.is_empty() {
+            return;
+        } else {
+            info!("Non-IP records only for {}. Skipping tests and caching directly.", domain);
+            write_to_cache(
+                domain,
+                cache_key,
+                template_msg,
+                Vec::new(),
+                other_records,
+                cache,
+            );
+            return;
+        }
     }
 
     let all_bogons = ip_pool.keys().all(is_bogon);
@@ -325,23 +339,21 @@ async fn background_aggregate_and_cache(
     }
 
     let results = join_all(tasks).await;
+    let mut fallback_candidates: Vec<(Record, f64)> = Vec::new();
     let mut candidates: Vec<(Record, f64, f64)> = Vec::new();
     let mut min_latency = f64::MAX;
 
     let current_mode = cache.get_mode();
 
     for (ip, meta, m443, m80) in results {
+        let is_reachable = m443.successes > 0 || m80.successes > 0;
         let actual_latency = if m443.successes > 0 {
             m443.mean_ms()
         } else if m80.successes > 0 {
             m80.mean_ms()
         } else {
-            continue;
+            f64::MAX
         };
-
-        if actual_latency < min_latency {
-            min_latency = actual_latency;
-        }
 
         let (freq_bonus, doh_bonus) = match current_mode {
             SpeedMode::Aggressive => (
@@ -358,13 +370,20 @@ async fn background_aggregate_and_cache(
             ),
         };
 
-        let final_score = actual_latency - freq_bonus - doh_bonus;
-
+        if is_reachable {
+            if actual_latency < min_latency {
+                min_latency = actual_latency;
+            }
+            let final_score = actual_latency - freq_bonus - doh_bonus;
+            candidates.push((meta.record, actual_latency, final_score));
+        } else {
+            let weight_score = freq_bonus + doh_bonus;
+            fallback_candidates.push((meta.record, weight_score));
+        }
         /*info!(
             "{} | {:.1}ms | Score: {:.1} | DoH: {}",
             ip, actual_latency, final_score, meta.has_doh
         );*/
-        candidates.push((meta.record, actual_latency, final_score));
     }
 
     let mut final_records: Vec<Record> = Vec::new();
@@ -389,8 +408,18 @@ async fn background_aggregate_and_cache(
             record.set_ttl(std::cmp::min(record.ttl(), 600));
             final_records.push(record);
         }
+    } else if !fallback_candidates.is_empty() {
+        info!("All unreachable {}", domain);
+        
+        fallback_candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        fallback_candidates.truncate(4);
+
+        for (mut record, _weight) in fallback_candidates {
+            record.set_ttl(std::cmp::min(record.ttl(), 600));
+            final_records.push(record);
+        }
     } else {
-        info!("All unreachable. {}", domain);
+        info!("No valid {}", domain);
         return;
     }
 
