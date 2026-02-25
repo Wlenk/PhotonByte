@@ -181,6 +181,9 @@ impl Middleware for UpstreamRunner {
 
             if final_winner_data.is_none() {
                 if let Ok(msg) = Message::from_vec(&data) {
+                    if msg.response_code() != hickory_proto::op::ResponseCode::NoError || msg.answer_count() == 0 {
+                        continue;
+                    }
                     if let Some(ip) = extract_first_ip(&msg) {
                         if is_bogon(&ip) {
                             info!("Drop {} from {}", ip, name);
@@ -356,17 +359,18 @@ async fn background_aggregate_and_cache(
         };
 
         let (freq_bonus, doh_bonus) = match current_mode {
+            // 🚀 修复2：大幅提高频次权重，降低 DoH 权重（DoH 仅作为同等频次下的决胜因素）
             SpeedMode::Aggressive => (
-                (meta.count as f64 - 1.0) * 20.0,
-                if meta.has_doh { 80.0 } else { 0.0 },
+                (meta.count as f64) * 30.0,
+                if meta.has_doh { 15.0 } else { 0.0 },
             ),
             SpeedMode::Balanced => (
-                (meta.count as f64).ln() * 15.0,
-                if meta.has_doh { 50.0 } else { 0.0 },
+                (meta.count as f64) * 20.0,
+                if meta.has_doh { 10.0 } else { 0.0 },
             ),
             SpeedMode::Conservative => (
-                (meta.count as f64).ln() * 10.0,
-                if meta.has_doh { 30.0 } else { 0.0 },
+                (meta.count as f64) * 15.0,
+                if meta.has_doh { 5.0 } else { 0.0 },
             ),
         };
 
@@ -400,7 +404,8 @@ async fn background_aggregate_and_cache(
         candidates.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap());
         candidates.truncate(4);
 
-        if cutoff_limit != 40.0 {
+        
+        if current_mode == SpeedMode::Aggressive {
             candidates.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
         }
 
@@ -408,9 +413,10 @@ async fn background_aggregate_and_cache(
             record.set_ttl(std::cmp::min(record.ttl(), 600));
             final_records.push(record);
         }
-    } else if !fallback_candidates.is_empty() {
-        info!("All unreachable {}", domain);
+    }else if !fallback_candidates.is_empty() {
+        info!("All unreachable {} - Fallback triggered", domain);
         
+        // 🚀 回退模式下，按频次和 DoH 加分从高到低排
         fallback_candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
         fallback_candidates.truncate(4);
 
@@ -441,8 +447,13 @@ fn write_to_cache(
     other_records: Vec<Record>,
     cache: Arc<Cache>,
 ) {
-    let mut final_records = ip_records;
+    let mut final_records = Vec::new();
+    
     for mut record in other_records {
+        record.set_ttl(std::cmp::min(record.ttl(), 600));
+        final_records.push(record);
+    }
+    for mut record in ip_records {
         record.set_ttl(std::cmp::min(record.ttl(), 600));
         final_records.push(record);
     }
@@ -459,6 +470,8 @@ fn write_to_cache(
     let mut cache_msg = Message::new();
     cache_msg.set_id(template.id());
     cache_msg.set_message_type(MessageType::Response);
+    cache_msg.set_response_code(template.response_code());
+    
     for q in template.queries() {
         cache_msg.add_query(q.clone());
     }
@@ -469,7 +482,7 @@ fn write_to_cache(
     if let Ok(bytes) = cache_msg.to_vec() {
         cache.set(cache_key, bytes, 600);
         info!(
-            "Cached {} for {} | Mode: {}",
+            "Cached {} records for {} | Mode: {}",
             cache_msg.answers().len(),
             domain,
             cache.get_mode().as_str()
