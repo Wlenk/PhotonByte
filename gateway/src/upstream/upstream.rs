@@ -359,7 +359,6 @@ async fn background_aggregate_and_cache(
         };
 
         let (freq_bonus, doh_bonus) = match current_mode {
-            // 🚀 修复2：大幅提高频次权重，降低 DoH 权重（DoH 仅作为同等频次下的决胜因素）
             SpeedMode::Aggressive => (
                 (meta.count as f64) * 30.0,
                 if meta.has_doh { 15.0 } else { 0.0 },
@@ -416,7 +415,6 @@ async fn background_aggregate_and_cache(
     }else if !fallback_candidates.is_empty() {
         info!("All unreachable {} - Fallback triggered", domain);
         
-        // 🚀 回退模式下，按频次和 DoH 加分从高到低排
         fallback_candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
         fallback_candidates.truncate(4);
 
